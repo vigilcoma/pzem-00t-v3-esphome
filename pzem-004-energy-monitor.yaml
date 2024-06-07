@@ -1,0 +1,263 @@
+esphome:
+  name: pzem-004-energy-monitor
+  friendly_name: pzem-004-energy-monitor
+
+esp8266:
+  board: d1_mini
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+
+ota:
+  password: "password"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Pzem-004-Energy-Monitor"
+    password: "ap_password"
+
+captive_portal:
+
+i2c:
+  sda: D2
+  scl: D1
+  scan: True
+  frequency: 800kHz
+  
+globals:
+  - id: display_switch
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+binary_sensor:
+  - platform: status
+    name: "PMeter status"
+  - platform: gpio
+    pin:
+      number: GPIO2
+      mode:
+        input: true
+        pullup: true
+    name: "Turn ON Display Button"
+    on_press:
+      then:
+        - globals.set:
+            id: display_switch
+            value: "true"
+        - delay: 10s
+        - globals.set:
+            id: display_switch
+            value: "false"
+ 
+font:
+  - file: "gfonts://Roboto"
+    id: my_font
+    size: 14
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x32"
+    id: "sensor_display"
+      
+    lambda: |-
+      if(id(display_switch)) {
+        it.printf(0, 0, id(my_font), "%.1fV", id(pMeter_voltage).state);
+        it.printf(64, 0, id(my_font), "%.1fA", TextAlign::TOP_RIGHT, id(pMeter_current).state);
+        it.line(0, 15, 128, 15);
+        if(id(pMeter_power).state < 1000) {
+          it.printf(0, 16, id(my_font), "Cons: %.1fW", id(pMeter_power).state);
+        } else {
+          it.printf(0, 16, id(my_font), "Cons: %.1fkW", id(pMeter_power).state/1000);
+        }
+      }
+
+uart:
+  - id: ubus
+    rx_pin: D6
+    tx_pin: D5
+    baud_rate: 9600
+    stop_bits: 1
+
+modbus:
+  id: mbus
+  uart_id: ubus
+
+time:
+  platform: sntp
+  id: my_time
+  
+  on_time:
+    # Every Month at specified day
+    - seconds: 0
+      minutes: 0
+      hours: 0
+      days_of_month: 1
+      then:
+        - sensor.integration.reset: total_energy_month #Reset power integrator
+    # Every Week at specified day
+    - seconds: 0
+      minutes: 0
+      hours: 0
+      days_of_week: MON
+      then:
+        - sensor.integration.reset: total_energy_week #Reset power integrator
+    # Every Day at specified hour
+    - seconds: 0
+      minutes: 0
+      hours: 0
+      then:
+        - sensor.integration.reset: total_energy_day #Reset power integrator
+
+sensor:
+  - platform: pzemac
+    address: 1
+    modbus_id: mbus
+    current:
+      name: "PMeter Current"
+      id: pMeter_current
+      accuracy_decimals: 2
+      state_class: "measurement"
+    voltage:
+      name: "PMeter Voltage"
+      id: pMeter_voltage
+      accuracy_decimals: 1
+      device_class: "voltage"
+    power:
+      name: "PMeter Power"
+      unit_of_measurement: W
+      accuracy_decimals: 2
+      id: pMeter_power
+      state_class: "measurement"
+    frequency:
+      name: "PMeter Frequency"
+      unit_of_measurement: Hz
+      accuracy_decimals: 2
+    power_factor:
+      name: "PMeter Power Factor"
+      id: pMeter_power_factor
+      device_class: "power_factor"
+      state_class: "measurement"
+    energy:
+      name: "PMeter Energy"
+      unit_of_measurement: Wh
+      accuracy_decimals: 1
+      id: pMeter_energy
+      state_class: "measurement"
+    update_interval: 10s
+ ###################################################
+
+  - platform: template
+    name: "PMeter - Cumulative power"
+    unit_of_measurement: "kWh"
+    accuracy_decimals: 1
+    update_interval: 10s
+    icon: mdi:power
+    lambda: return (( (id(pMeter_energy).state)/1000.0));
+    
+  - platform: template
+    name: "PMeter - power apparente"
+    id: pMeter_power_apparente
+    unit_of_measurement: "VA"
+    device_class: "apparent_power"
+    state_class: "measurement"
+    accuracy_decimals: 2
+    update_interval: 10s
+    icon: mdi:power
+    lambda: return ( (id(pMeter_power).state/id(pMeter_power_factor).state));
+  
+  - platform: template
+    name: "PMeter - power reactive"
+    id: pMeter_power_reactive
+    unit_of_measurement: "VAr"
+    accuracy_decimals: 2
+    update_interval: 10s
+    icon: mdi:power
+    lambda: return ( ( sqrt( (id(pMeter_power_apparente).state)*(id(pMeter_power_apparente).state)   -  (id(pMeter_power).state)*(id(pMeter_power).state) ) )  );
+
+  - platform: integration
+    name: "Total Consumption"
+    id: "total_energy"
+    sensor: pMeter_power
+    time_unit: h
+    device_class: "energy"
+    state_class: "total_increasing"
+    unit_of_measurement: kWh
+    accuracy_decimals: 2
+    restore: false #If true, save the reading to the flash memory to prevent data loss in case of power loss
+    filters:
+      - multiply: 0.001
+
+  - platform: integration
+    name: "Daily Consumption"
+    id: "total_energy_day"
+    sensor: pMeter_power
+    time_unit: h
+    device_class: "energy"
+    state_class: "total_increasing"
+    unit_of_measurement: kWh
+    accuracy_decimals: 2
+    restore: false #If true, save the reading to the flash memory to prevent data loss in case of power loss
+    filters:
+      - multiply: 0.001
+
+  - platform: integration
+    name: "Weekly Consumption"
+    id: "total_energy_week"
+    sensor: pMeter_power
+    time_unit: h
+    device_class: "energy"
+    state_class: "total_increasing"
+    unit_of_measurement: kWh
+    accuracy_decimals: 2
+    restore: false #If true, save the reading to the flash memory to prevent data loss in case of power loss
+    filters:
+      - multiply: 0.001
+
+  - platform: integration
+    name: "Monthly Consumption"
+    id: "total_energy_month"
+    sensor: pMeter_power
+    time_unit: h
+    device_class: "energy"
+    state_class: "total_increasing"
+    unit_of_measurement: kWh
+    accuracy_decimals: 2
+    restore: false #If true, save the reading to the flash memory to prevent data loss in case of power loss
+    filters:
+      - multiply: 0.001
+    
+  - platform: wifi_signal
+    name: "WiFi power PMeter"
+    update_interval: 10s
+    
+  - platform: uptime
+    name: "up"
+    id: uptime_sec 
+ 
+switch:
+  - platform: restart
+    name: "PMeter restart"
+    
+text_sensor:
+  - platform: template
+    name: PMeter uptime
+    lambda: |-
+      int seconds = (id(uptime_sec).state);
+      int days = seconds / (24 * 3600);
+      seconds = seconds % (24 * 3600); 
+      int hours = seconds / 3600;
+      seconds = seconds % 3600;
+      int minutes = seconds /  60;
+      seconds = seconds % 60;
+      return { (String(days) +"d " + String(hours) +"h " + String(minutes) +"m "+ String(seconds) +"s").c_str() };
+    icon: mdi:clock-start
+    update_interval: 113s
+    
